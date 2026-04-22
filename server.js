@@ -69,51 +69,128 @@ app.get('/search', async (req, res) => {
   }
 });
 
-app.get('/read', async (req, res) => {
+app.get('/find-file', async (req, res) => {
   try {
-    const fileRef = req.query.path || req.query.id;
-    if (!fileRef) {
-      return res.status(400).json({ error: 'Parametro path o id mancante' });
+    const folder = req.query.folder;
+    const name = req.query.name;
+
+    if (!folder || !name) {
+      return res.status(400).json({ error: 'Servono i parametri folder e name' });
     }
 
-    const response = await dropboxContentApi('files/download', { path: fileRef });
+    const response = await dropboxApi('files/list_folder', {
+      path: folder,
+      recursive: false
+    });
 
-    if (!response.ok) {
-      const text = await response.text();
-      return res.status(response.status).json({ error: 'Errore download file', details: text });
+    const data = await response.json();
+
+    if (!data.entries || !Array.isArray(data.entries)) {
+      return res.status(500).json({ error: 'Risposta Dropbox non valida', details: data });
     }
 
-    const buffer = await response.buffer();
-    const lowerRef = fileRef.toLowerCase();
+    const found = data.entries.find(entry =>
+      entry[".tag"] === "file" &&
+      entry.name &&
+      entry.name.toLowerCase() === name.toLowerCase()
+    );
 
-    if (lowerRef.endsWith('.txt') || lowerRef.endsWith('.md')) {
+    if (!found) {
+      return res.status(404).json({
+        error: 'File non trovato nella cartella indicata',
+        folder,
+        name
+      });
+    }
+
+    res.json(found);
+  } catch (error) {
+    res.status(500).json({ error: 'Errore nella ricerca del file', details: error.message });
+  }
+});
+
+app.get('/read-by-name', async (req, res) => {
+  try {
+    const folder = req.query.folder;
+    const name = req.query.name;
+
+    if (!folder || !name) {
+      return res.status(400).json({ error: 'Servono i parametri folder e name' });
+    }
+
+    const listResponse = await dropboxApi('files/list_folder', {
+      path: folder,
+      recursive: false
+    });
+
+    const listData = await listResponse.json();
+
+    if (!listData.entries || !Array.isArray(listData.entries)) {
+      return res.status(500).json({ error: 'Risposta Dropbox non valida', details: listData });
+    }
+
+    const found = listData.entries.find(entry =>
+      entry[".tag"] === "file" &&
+      entry.name &&
+      entry.name.toLowerCase() === name.toLowerCase()
+    );
+
+    if (!found) {
+      return res.status(404).json({
+        error: 'File non trovato nella cartella indicata',
+        folder,
+        name
+      });
+    }
+
+    const filePath = found.path_lower || found.path_display;
+
+    const downloadResponse = await dropboxContentApi('files/download', { path: filePath });
+
+    if (!downloadResponse.ok) {
+      const text = await downloadResponse.text();
+      return res.status(downloadResponse.status).json({
+        error: 'Errore download file',
+        details: text,
+        filePath
+      });
+    }
+
+    const buffer = await downloadResponse.buffer();
+    const lowerName = found.name.toLowerCase();
+
+    if (lowerName.endsWith('.txt') || lowerName.endsWith('.md')) {
       return res.json({
-        ref: fileRef,
+        file: found.name,
+        path: filePath,
         type: 'text',
         content: buffer.toString('utf8')
       });
     }
 
-    if (lowerRef.endsWith('.docx')) {
+    if (lowerName.endsWith('.docx')) {
       const result = await mammoth.extractRawText({ buffer });
       return res.json({
-        ref: fileRef,
+        file: found.name,
+        path: filePath,
         type: 'docx',
         content: result.value
       });
     }
 
-    if (lowerRef.endsWith('.pdf')) {
+    if (lowerName.endsWith('.pdf')) {
       const result = await pdfParse(buffer);
       return res.json({
-        ref: fileRef,
+        file: found.name,
+        path: filePath,
         type: 'pdf',
         content: result.text
       });
     }
 
     return res.json({
-      ref: fileRef,
+      file: found.name,
+      path: filePath,
       type: 'unsupported',
       content: 'Formato non ancora supportato per lettura testuale automatica'
     });
