@@ -29,6 +29,54 @@ function dropboxContentApi(path, apiArg) {
   });
 }
 
+async function readDropboxFile(filePath, fileName) {
+  const downloadResponse = await dropboxContentApi('files/download', { path: filePath });
+
+  if (!downloadResponse.ok) {
+    const text = await downloadResponse.text();
+    throw new Error(`Errore download file: ${text}`);
+  }
+
+  const buffer = await downloadResponse.buffer();
+  const lowerName = fileName.toLowerCase();
+
+  if (lowerName.endsWith('.txt') || lowerName.endsWith('.md')) {
+    return {
+      file: fileName,
+      path: filePath,
+      type: 'text',
+      content: buffer.toString('utf8')
+    };
+  }
+
+  if (lowerName.endsWith('.docx')) {
+    const result = await mammoth.extractRawText({ buffer });
+    return {
+      file: fileName,
+      path: filePath,
+      type: 'docx',
+      content: result.value
+    };
+  }
+
+  if (lowerName.endsWith('.pdf')) {
+    const result = await pdfParse(buffer);
+    return {
+      file: fileName,
+      path: filePath,
+      type: 'pdf',
+      content: result.text
+    };
+  }
+
+  return {
+    file: fileName,
+    path: filePath,
+    type: 'unsupported',
+    content: 'Formato non ancora supportato per lettura testuale automatica'
+  };
+}
+
 app.get('/', (req, res) => {
   res.send('Server attivo');
 });
@@ -69,13 +117,13 @@ app.get('/search', async (req, res) => {
   }
 });
 
-app.get('/find-file', async (req, res) => {
+app.get('/read-first-match', async (req, res) => {
   try {
     const folder = req.query.folder;
-    const name = req.query.name;
+    const q = req.query.q;
 
-    if (!folder || !name) {
-      return res.status(400).json({ error: 'Servono i parametri folder e name' });
+    if (!folder || !q) {
+      return res.status(400).json({ error: 'Servono i parametri folder e q' });
     }
 
     const response = await dropboxApi('files/list_folder', {
@@ -92,108 +140,20 @@ app.get('/find-file', async (req, res) => {
     const found = data.entries.find(entry =>
       entry[".tag"] === "file" &&
       entry.name &&
-      entry.name.toLowerCase() === name.toLowerCase()
+      entry.name.toLowerCase().includes(q.toLowerCase())
     );
 
     if (!found) {
       return res.status(404).json({
-        error: 'File non trovato nella cartella indicata',
+        error: 'Nessun file trovato con quel testo nel nome',
         folder,
-        name
-      });
-    }
-
-    res.json(found);
-  } catch (error) {
-    res.status(500).json({ error: 'Errore nella ricerca del file', details: error.message });
-  }
-});
-
-app.get('/read-by-name', async (req, res) => {
-  try {
-    const folder = req.query.folder;
-    const name = req.query.name;
-
-    if (!folder || !name) {
-      return res.status(400).json({ error: 'Servono i parametri folder e name' });
-    }
-
-    const listResponse = await dropboxApi('files/list_folder', {
-      path: folder,
-      recursive: false
-    });
-
-    const listData = await listResponse.json();
-
-    if (!listData.entries || !Array.isArray(listData.entries)) {
-      return res.status(500).json({ error: 'Risposta Dropbox non valida', details: listData });
-    }
-
-    const found = listData.entries.find(entry =>
-      entry[".tag"] === "file" &&
-      entry.name &&
-      entry.name.toLowerCase() === name.toLowerCase()
-    );
-
-    if (!found) {
-      return res.status(404).json({
-        error: 'File non trovato nella cartella indicata',
-        folder,
-        name
+        q
       });
     }
 
     const filePath = found.path_lower || found.path_display;
-
-    const downloadResponse = await dropboxContentApi('files/download', { path: filePath });
-
-    if (!downloadResponse.ok) {
-      const text = await downloadResponse.text();
-      return res.status(downloadResponse.status).json({
-        error: 'Errore download file',
-        details: text,
-        filePath
-      });
-    }
-
-    const buffer = await downloadResponse.buffer();
-    const lowerName = found.name.toLowerCase();
-
-    if (lowerName.endsWith('.txt') || lowerName.endsWith('.md')) {
-      return res.json({
-        file: found.name,
-        path: filePath,
-        type: 'text',
-        content: buffer.toString('utf8')
-      });
-    }
-
-    if (lowerName.endsWith('.docx')) {
-      const result = await mammoth.extractRawText({ buffer });
-      return res.json({
-        file: found.name,
-        path: filePath,
-        type: 'docx',
-        content: result.value
-      });
-    }
-
-    if (lowerName.endsWith('.pdf')) {
-      const result = await pdfParse(buffer);
-      return res.json({
-        file: found.name,
-        path: filePath,
-        type: 'pdf',
-        content: result.text
-      });
-    }
-
-    return res.json({
-      file: found.name,
-      path: filePath,
-      type: 'unsupported',
-      content: 'Formato non ancora supportato per lettura testuale automatica'
-    });
+    const result = await readDropboxFile(filePath, found.name);
+    res.json(result);
   } catch (error) {
     res.status(500).json({ error: 'Errore lettura file', details: error.message });
   }
