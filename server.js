@@ -1,165 +1,149 @@
 const express = require('express');
 const fetch = require('node-fetch');
-const mammoth = require('mammoth');
-const pdfParse = require('pdf-parse');
 
 const app = express();
 app.use(express.json());
 
 const DROPBOX_TOKEN = process.env.DROPBOX_TOKEN;
 
-function dropboxApi(path, body) {
-  return fetch(`https://api.dropboxapi.com/2/${path}`, {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${DROPBOX_TOKEN}`,
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify(body)
-  });
-}
-
-function dropboxContentApi(path, apiArg) {
-  return fetch(`https://content.dropboxapi.com/2/${path}`, {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${DROPBOX_TOKEN}`,
-      'Dropbox-API-Arg': JSON.stringify(apiArg)
-    }
-  });
-}
-
-async function readDropboxFile(filePath, fileName) {
-  const downloadResponse = await dropboxContentApi('files/download', { path: filePath });
-
-  if (!downloadResponse.ok) {
-    const text = await downloadResponse.text();
-    throw new Error(`Errore download file: ${text}`);
-  }
-
-  const buffer = await downloadResponse.buffer();
-  const lowerName = fileName.toLowerCase();
-
-  if (lowerName.endsWith('.txt') || lowerName.endsWith('.md')) {
-    return {
-      file: fileName,
-      path: filePath,
-      type: 'text',
-      content: buffer.toString('utf8')
-    };
-  }
-
-  if (lowerName.endsWith('.docx')) {
-    const result = await mammoth.extractRawText({ buffer });
-    return {
-      file: fileName,
-      path: filePath,
-      type: 'docx',
-      content: result.value
-    };
-  }
-
-  if (lowerName.endsWith('.pdf')) {
-    const result = await pdfParse(buffer);
-    return {
-      file: fileName,
-      path: filePath,
-      type: 'pdf',
-      content: result.text
-    };
-  }
-
-  return {
-    file: fileName,
-    path: filePath,
-    type: 'unsupported',
-    content: 'Formato non ancora supportato per lettura testuale automatica'
-  };
-}
-
+// TEST SERVER
 app.get('/', (req, res) => {
   res.send('Server attivo');
 });
 
+
+// LISTA FILE
 app.get('/files', async (req, res) => {
   try {
-    const path = req.query.path || '';
-    const response = await dropboxApi('files/list_folder', {
-      path,
-      recursive: false
+    const response = await fetch('https://api.dropboxapi.com/2/files/list_folder', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${DROPBOX_TOKEN}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        path: "",
+        recursive: false
+      })
     });
+
     const data = await response.json();
     res.json(data);
+
   } catch (error) {
-    res.status(500).json({ error: 'Errore nel recupero file', details: error.message });
+    res.status(500).json({ error: error.message });
   }
 });
 
-app.get('/search', async (req, res) => {
+
+// LEGGI FILE PER ID (CORRETTO)
+app.get('/read', async (req, res) => {
   try {
-    const query = req.query.q;
-    if (!query) {
-      return res.status(400).json({ error: 'Parametro q mancante' });
+    const { id } = req.query;
+
+    if (!id) {
+      return res.status(400).json({ error: "Parametro 'id' mancante" });
     }
 
-    const response = await dropboxApi('files/search_v2', {
-      query,
-      options: {
-        filename_only: true,
-        max_results: 20
+    const response = await fetch('https://content.dropboxapi.com/2/files/download', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${DROPBOX_TOKEN}`,
+        'Dropbox-API-Arg': JSON.stringify({
+          path: `id:${id}`
+        })
       }
     });
 
-    const data = await response.json();
-    res.json(data);
+    if (!response.ok) {
+      const errText = await response.text();
+      return res.status(500).send(errText);
+    }
+
+    const buffer = await response.buffer();
+
+    // 🔥 QUESTO È IL FIX IMPORTANTE
+    res.setHeader('Content-Type', 'application/pdf');
+    res.send(buffer);
+
   } catch (error) {
-    res.status(500).json({ error: 'Errore nella ricerca', details: error.message });
+    res.status(500).json({ error: error.message });
   }
 });
 
+
+// CERCA E APRE IL PRIMO FILE (CORRETTO)
 app.get('/read-first-match', async (req, res) => {
   try {
-    const folder = req.query.folder;
-    const q = req.query.q;
+    const { folder, q } = req.query;
 
     if (!folder || !q) {
-      return res.status(400).json({ error: 'Servono i parametri folder e q' });
+      return res.status(400).json({ error: "Parametri 'folder' e 'q' obbligatori" });
     }
 
-    const response = await dropboxApi('files/list_folder', {
-      path: folder,
-      recursive: false
+    // 1. Lista file nella cartella
+    const listResponse = await fetch('https://api.dropboxapi.com/2/files/list_folder', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${DROPBOX_TOKEN}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        path: folder,
+        recursive: false
+      })
     });
 
-    const data = await response.json();
+    const listData = await listResponse.json();
 
-    if (!data.entries || !Array.isArray(data.entries)) {
-      return res.status(500).json({ error: 'Risposta Dropbox non valida', details: data });
+    if (!listData.entries) {
+      return res.status(500).json({ error: "Errore nel recupero file" });
     }
 
-    const found = data.entries.find(entry =>
-      entry[".tag"] === "file" &&
-      entry.name &&
-      entry.name.toLowerCase().includes(q.toLowerCase())
+    // 2. Trova primo file che contiene la parola
+    const file = listData.entries.find(f =>
+      f[".tag"] === "file" &&
+      f.name.toLowerCase().includes(q.toLowerCase())
     );
 
-    if (!found) {
+    if (!file) {
       return res.status(404).json({
-        error: 'Nessun file trovato con quel testo nel nome',
+        error: "File non trovato nella cartella indicata",
         folder,
-        q
+        query: q
       });
     }
 
-    const filePath = found.path_lower || found.path_display;
-    const result = await readDropboxFile(filePath, found.name);
-    res.json(result);
+    // 3. Scarica file tramite ID
+    const downloadResponse = await fetch('https://content.dropboxapi.com/2/files/download', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${DROPBOX_TOKEN}`,
+        'Dropbox-API-Arg': JSON.stringify({
+          path: `id:${file.id}`
+        })
+      }
+    });
+
+    if (!downloadResponse.ok) {
+      const errText = await downloadResponse.text();
+      return res.status(500).send(errText);
+    }
+
+    const buffer = await downloadResponse.buffer();
+
+    // 🔥 FIX: mostra PDF correttamente
+    res.setHeader('Content-Type', 'application/pdf');
+    res.send(buffer);
+
   } catch (error) {
-    res.status(500).json({ error: 'Errore lettura file', details: error.message });
+    res.status(500).json({ error: error.message });
   }
 });
 
+
+// AVVIO SERVER
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`Server avviato sulla porta ${PORT}`);
+  console.log(`Server attivo sulla porta ${PORT}`);
 });
