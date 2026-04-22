@@ -71,12 +71,12 @@ app.get('/search', async (req, res) => {
 
 app.get('/read', async (req, res) => {
   try {
-    const path = req.query.path;
-    if (!path) {
-      return res.status(400).json({ error: 'Parametro path mancante' });
+    const fileRef = req.query.path || req.query.id;
+    if (!fileRef) {
+      return res.status(400).json({ error: 'Parametro path o id mancante' });
     }
 
-    const response = await dropboxContentApi('files/download', { path });
+    const response = await dropboxContentApi('files/download', { path: fileRef });
 
     if (!response.ok) {
       const text = await response.text();
@@ -84,36 +84,36 @@ app.get('/read', async (req, res) => {
     }
 
     const buffer = await response.buffer();
-    const lowerPath = path.toLowerCase();
+    const lowerRef = fileRef.toLowerCase();
 
-    if (lowerPath.endsWith('.txt') || lowerPath.endsWith('.md')) {
+    if (lowerRef.endsWith('.txt') || lowerRef.endsWith('.md')) {
       return res.json({
-        path,
+        ref: fileRef,
         type: 'text',
         content: buffer.toString('utf8')
       });
     }
 
-    if (lowerPath.endsWith('.docx')) {
+    if (lowerRef.endsWith('.docx')) {
       const result = await mammoth.extractRawText({ buffer });
       return res.json({
-        path,
+        ref: fileRef,
         type: 'docx',
         content: result.value
       });
     }
 
-    if (lowerPath.endsWith('.pdf')) {
+    if (lowerRef.endsWith('.pdf')) {
       const result = await pdfParse(buffer);
       return res.json({
-        path,
+        ref: fileRef,
         type: 'pdf',
         content: result.text
       });
     }
 
     return res.json({
-      path,
+      ref: fileRef,
       type: 'unsupported',
       content: 'Formato non ancora supportato per lettura testuale automatica'
     });
